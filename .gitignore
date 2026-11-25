@@ -1,0 +1,17 @@
+# secrets and local env
+.env
+
+# python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# node (Phase 2)
+node_modules/
+dist/
+
+# keep PRDs local
+PRD_P1.md
+PRD_P2.md
