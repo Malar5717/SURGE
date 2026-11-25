@@ -4,8 +4,8 @@ from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select, text
-from sqlalchemy.orm import Session
+from sqlalchemy import and_, or_, select, text, true
+from sqlalchemy.orm import Session, aliased
 
 from . import models  # noqa: F401  (registers tables on Base.metadata)
 from .db import Base, engine, get_session
@@ -77,6 +77,15 @@ class LinkOut(BaseModel):
     incident_b: int
     created_by: str | None
     created_at: datetime
+
+
+class LinkCoordsOut(BaseModel):
+    incident_a: int
+    incident_b: int
+    a_lat: float
+    a_lng: float
+    b_lat: float
+    b_lng: float
 
 
 class EventCreate(BaseModel):
@@ -225,3 +234,56 @@ def delete_link(
         raise HTTPException(status_code=404, detail="link not found")
     session.delete(link)
     session.commit()
+
+
+@app.get("/links", response_model=list[LinkCoordsOut])
+def list_links(
+    session: Session = Depends(get_session),
+    min_lat: Annotated[float | None, Query(ge=-90, le=90)] = None,
+    max_lat: Annotated[float | None, Query(ge=-90, le=90)] = None,
+    min_lng: Annotated[float | None, Query(ge=-180, le=180)] = None,
+    max_lng: Annotated[float | None, Query(ge=-180, le=180)] = None,
+):
+    """List links, keeping any with at least one end inside the box."""
+    a = aliased(Incident)
+    b = aliased(Incident)
+    stmt = (
+        select(
+            IncidentLink.incident_a,
+            IncidentLink.incident_b,
+            a.lat,
+            a.lng,
+            b.lat,
+            b.lng,
+        )
+        .join(a, a.id == IncidentLink.incident_a)
+        .join(b, b.id == IncidentLink.incident_b)
+        .order_by(IncidentLink.incident_a, IncidentLink.incident_b)
+    )
+
+    def inside(side):
+        conditions = []
+        if min_lat is not None:
+            conditions.append(side.lat >= min_lat)
+        if max_lat is not None:
+            conditions.append(side.lat <= max_lat)
+        if min_lng is not None:
+            conditions.append(side.lng >= min_lng)
+        if max_lng is not None:
+            conditions.append(side.lng <= max_lng)
+        return and_(*conditions) if conditions else true()
+
+    if any(v is not None for v in (min_lat, max_lat, min_lng, max_lng)):
+        stmt = stmt.where(or_(inside(a), inside(b)))
+
+    return [
+        LinkCoordsOut(
+            incident_a=link_a,
+            incident_b=link_b,
+            a_lat=alat,
+            a_lng=alng,
+            b_lat=blat,
+            b_lng=blng,
+        )
+        for link_a, link_b, alat, alng, blat, blng in session.execute(stmt)
+    ]

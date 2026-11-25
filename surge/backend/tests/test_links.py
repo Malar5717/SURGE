@@ -115,3 +115,80 @@ def test_deleting_a_missing_link_gives_404(client):
     a = _create(client)
     b = _create(client)
     assert client.delete(f"/incidents/{a}/links/{b}").status_code == 404
+
+
+def _create_at(client, lat, lng):
+    return client.post(
+        "/incidents", json={"category": "pothole", "lat": lat, "lng": lng}
+    ).json()["id"]
+
+
+def _linked_pair(client):
+    a = _create_at(client, 13.0, 80.0)
+    b = _create_at(client, 13.1, 80.1)
+    client.post(f"/incidents/{a}/links", json={"other_id": b})
+    return a, b
+
+
+def test_links_without_params_returns_all(client):
+    a, b = _linked_pair(client)
+
+    body = client.get("/links").json()
+    assert len(body) == 1
+    link = body[0]
+    assert (link["incident_a"], link["incident_b"]) == (min(a, b), max(a, b))
+
+
+def test_links_box_with_both_ends_returns_link(client):
+    _linked_pair(client)
+
+    body = client.get(
+        "/links",
+        params={
+            "min_lat": 12.9,
+            "max_lat": 13.2,
+            "min_lng": 79.9,
+            "max_lng": 80.2,
+        },
+    ).json()
+    assert len(body) == 1
+
+
+def test_links_box_with_one_end_returns_link(client):
+    a, _ = _linked_pair(client)
+
+    body = client.get(
+        "/links",
+        params={
+            "min_lat": 12.95,
+            "max_lat": 13.05,
+            "min_lng": 79.95,
+            "max_lng": 80.05,
+        },
+    ).json()
+    assert [link["incident_a"] for link in body] == [a]
+
+
+def test_links_box_with_neither_end_returns_nothing(client):
+    _linked_pair(client)
+
+    body = client.get(
+        "/links",
+        params={
+            "min_lat": 10.0,
+            "max_lat": 10.5,
+            "min_lng": 70.0,
+            "max_lng": 70.5,
+        },
+    ).json()
+    assert body == []
+
+
+def test_links_include_both_ends_coordinates(client):
+    a, b = _linked_pair(client)
+
+    link = client.get("/links").json()[0]
+    assert link["incident_a"] == a
+    assert link["incident_b"] == b
+    assert (link["a_lat"], link["a_lng"]) == (13.0, 80.0)
+    assert (link["b_lat"], link["b_lng"]) == (13.1, 80.1)
