@@ -9,6 +9,7 @@ import {
 } from "react-leaflet";
 import { fetchIncidents, fetchLinks } from "../api.js";
 import { CATEGORIES, CATEGORY_BY_KEY } from "../categories.js";
+import AuthPanel from "./AuthPanel.jsx";
 import DetailPanel from "./DetailPanel.jsx";
 import FilterChips from "./FilterChips.jsx";
 
@@ -58,7 +59,7 @@ function MapController({ onReady }) {
   return null;
 }
 
-export default function MapView() {
+export default function MapView({ user, onAuth, onLogout }) {
   const [incidents, setIncidents] = useState([]);
   const [links, setLinks] = useState([]);
   const [status, setStatus] = useState("loading");
@@ -192,6 +193,9 @@ export default function MapView() {
       </MapContainer>
 
       <div className="overlay-top">
+        <div className="auth-row">
+          <AuthPanel user={user} onAuth={onAuth} onLogout={onLogout} />
+        </div>
         <FilterChips active={activeCategories} onToggle={toggleCategory} />
         {status === "loading" && <div className="status">Loading…</div>}
         {status === "empty" && <div className="status">No incidents here</div>}

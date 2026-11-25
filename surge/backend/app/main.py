@@ -8,8 +8,9 @@ from sqlalchemy import and_, or_, select, text, true
 from sqlalchemy.orm import Session, aliased
 
 from . import models  # noqa: F401  (registers tables on Base.metadata)
+from .auth import current_user, router as auth_router
 from .db import Base, engine, get_session
-from .models import CATEGORIES, Event, Incident, IncidentLink
+from .models import CATEGORIES, Event, Incident, IncidentLink, User
 from .logic import find_candidates, group_of, linked_ids
 
 Category = Literal[*CATEGORIES]
@@ -22,6 +23,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="SURGE API", version="0.1.0", lifespan=lifespan)
+app.include_router(auth_router)
 
 
 class IncidentCreate(BaseModel):
@@ -41,7 +43,7 @@ class IncidentOut(BaseModel):
     lng: float
     accuracy_m: float | None
     description: str | None
-    created_by: str | None
+    created_by_handle: str | None
     created_at: datetime
 
 
@@ -52,7 +54,7 @@ class EventOut(BaseModel):
     incident_id: int
     type: str
     note: str | None
-    created_by: str | None
+    created_by_handle: str | None
     created_at: datetime
 
 
@@ -75,7 +77,7 @@ class LinkOut(BaseModel):
 
     incident_a: int
     incident_b: int
-    created_by: str | None
+    created_by_handle: str | None
     created_at: datetime
 
 
@@ -128,10 +130,14 @@ def health(session: Session = Depends(get_session)):
 
 
 @app.post("/incidents", response_model=IncidentDetail, status_code=201)
-def create_incident(payload: IncidentCreate, session: Session = Depends(get_session)):
+def create_incident(
+    payload: IncidentCreate,
+    user: User = Depends(current_user),
+    session: Session = Depends(get_session),
+):
     """Store a new incident and its first reported event."""
-    incident = Incident(**payload.model_dump())
-    incident.events.append(Event(type="reported"))
+    incident = Incident(**payload.model_dump(), created_by=user.id)
+    incident.events.append(Event(type="reported", created_by=user.id))
     session.add(incident)
     session.commit()
     session.refresh(incident)
@@ -191,11 +197,19 @@ def get_incident(incident_id: int, session: Session = Depends(get_session)):
     status_code=201,
 )
 def add_event(
-    incident_id: int, payload: EventCreate, session: Session = Depends(get_session)
+    incident_id: int,
+    payload: EventCreate,
+    user: User = Depends(current_user),
+    session: Session = Depends(get_session),
 ):
     """Append a note event to an incident."""
     incident = _get_incident(session, incident_id)
-    event = Event(incident_id=incident.id, type=payload.type, note=payload.note)
+    event = Event(
+        incident_id=incident.id,
+        type=payload.type,
+        note=payload.note,
+        created_by=user.id,
+    )
     session.add(event)
     session.commit()
     session.refresh(event)
@@ -204,7 +218,10 @@ def add_event(
 
 @app.post("/incidents/{incident_id}/links", response_model=LinkOut, status_code=201)
 def create_link(
-    incident_id: int, payload: LinkCreate, session: Session = Depends(get_session)
+    incident_id: int,
+    payload: LinkCreate,
+    user: User = Depends(current_user),
+    session: Session = Depends(get_session),
 ):
     """Link this incident to another one."""
     incident = _get_incident(session, incident_id)
@@ -216,7 +233,7 @@ def create_link(
     if session.get(IncidentLink, (a, b)) is not None:
         raise HTTPException(status_code=409, detail="link already exists")
 
-    link = IncidentLink(incident_a=a, incident_b=b)
+    link = IncidentLink(incident_a=a, incident_b=b, created_by=user.id)
     session.add(link)
     session.commit()
     session.refresh(link)
@@ -225,13 +242,18 @@ def create_link(
 
 @app.delete("/incidents/{incident_id}/links/{other_id}", status_code=204)
 def delete_link(
-    incident_id: int, other_id: int, session: Session = Depends(get_session)
+    incident_id: int,
+    other_id: int,
+    user: User = Depends(current_user),
+    session: Session = Depends(get_session),
 ):
-    """Remove the link between two incidents."""
+    """Remove a link the current user created."""
     a, b = sorted((incident_id, other_id))
     link = session.get(IncidentLink, (a, b))
     if link is None:
         raise HTTPException(status_code=404, detail="link not found")
+    if link.created_by != user.id:
+        raise HTTPException(status_code=403, detail="only the creator can delete this link")
     session.delete(link)
     session.commit()
 

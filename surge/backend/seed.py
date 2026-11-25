@@ -1,9 +1,11 @@
 """Reset the main database and load sample incidents around Chennai."""
 
-from sqlalchemy import text
-
 from app.db import Base, SessionLocal, engine
-from app.models import Event, Incident, IncidentLink
+from app.models import Event, Incident, IncidentLink, User
+from app.security import hash_password
+
+DEMO_USERS = ("asha", "ravi", "meena")
+DEMO_PASSWORD = "surge-demo-password"
 
 AREAS = {
     "Anna Nagar": (13.0850, 80.2101),
@@ -70,44 +72,71 @@ CLUSTERS = [
 
 
 def main():
+    Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
 
     with SessionLocal() as session:
-        session.execute(
-            text(
-                "TRUNCATE events, incident_links, incidents RESTART IDENTITY CASCADE"
+        users = []
+        for handle in DEMO_USERS:
+            user = User(
+                handle=handle,
+                handle_lower=handle,
+                password_hash=hash_password(DEMO_PASSWORD),
             )
-        )
+            session.add(user)
+            users.append(user)
+        session.flush()
 
         incidents = []
         for i, (area, category, description) in enumerate(SEED):
             base_lat, base_lng = AREAS[area]
             lat = base_lat + ((i % 5) - 2) * 0.00005
             lng = base_lng + ((i % 7) - 3) * 0.00005
+            creator = users[i % len(users)]
             incident = Incident(
-                category=category, lat=lat, lng=lng, description=description
+                category=category,
+                lat=lat,
+                lng=lng,
+                description=description,
+                created_by=creator.id,
             )
-            incident.events.append(Event(type="reported"))
+            incident.events.append(Event(type="reported", created_by=creator.id))
             session.add(incident)
             incidents.append(incident)
         session.flush()
 
         for index, note in NOTES:
             session.add(
-                Event(incident_id=incidents[index].id, type="note", note=note)
+                Event(
+                    incident_id=incidents[index].id,
+                    type="note",
+                    note=note,
+                    created_by=users[(index + 1) % len(users)].id,
+                )
             )
 
         links = 0
         for group in CLUSTERS:
             for left, right in zip(group, group[1:]):
                 a, b = sorted((incidents[left].id, incidents[right].id))
-                session.add(IncidentLink(incident_a=a, incident_b=b))
+                session.add(
+                    IncidentLink(
+                        incident_a=a,
+                        incident_b=b,
+                        created_by=users[left % len(users)].id,
+                    )
+                )
                 links += 1
 
         session.commit()
 
     print(
         f"Seeded {len(incidents)} incidents, {len(NOTES)} notes and {links} links."
+    )
+    print(
+        "Demo logins: "
+        + ", ".join(DEMO_USERS)
+        + f" (password: {DEMO_PASSWORD})"
     )
 
 

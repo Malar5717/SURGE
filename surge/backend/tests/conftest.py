@@ -30,7 +30,10 @@ def clean_tables():
     """Empty the tables before each test."""
     with engine.begin() as conn:
         conn.execute(
-            text("TRUNCATE events, incident_links, incidents RESTART IDENTITY CASCADE")
+            text(
+                "TRUNCATE auth_events, sessions, events, incident_links, "
+                "incidents, users RESTART IDENTITY CASCADE"
+            )
         )
     yield
 
@@ -40,6 +43,16 @@ def client():
     """A test client that runs the app lifespan."""
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def auth_client(client):
+    """A client already logged in as the default test user."""
+    response = client.post(
+        "/auth/signup", json={"handle": "tester", "password": "password123"}
+    )
+    assert response.status_code == 201
+    return client
 
 
 @pytest.fixture

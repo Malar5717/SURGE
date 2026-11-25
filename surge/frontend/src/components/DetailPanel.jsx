@@ -57,7 +57,10 @@ export default function DetailPanel({
             <p className="panel-description">{incident.description}</p>
           )}
           <p className="panel-muted">
-            Reported {new Date(incident.created_at).toLocaleString()}
+            {incident.created_by_handle
+              ? `Reported by @${incident.created_by_handle}`
+              : "Reported"}{" "}
+            {new Date(incident.created_at).toLocaleString()}
           </p>
           <ol className="timeline">
             {incident.events.map((event) => (
@@ -68,6 +71,7 @@ export default function DetailPanel({
                 {event.note && <span className="timeline-note"> — {event.note}</span>}
                 <div className="timeline-time">
                   {new Date(event.created_at).toLocaleString()}
+                  {event.created_by_handle && ` · by @${event.created_by_handle}`}
                 </div>
               </li>
             ))}
