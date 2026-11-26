@@ -13,10 +13,19 @@ def _two_incidents(session):
     return a, b
 
 
-def _create(auth_client, lat=13.0):
-    return auth_client.post(
-        "/incidents", json={"category": "pothole", "lat": lat, "lng": 80.0}
-    ).json()["id"]
+def _create(client, post_incident, lat=13.0):
+    return post_incident(client, category="pothole", lat=lat).json()["id"]
+
+
+def _create_at(client, post_incident, lat, lng):
+    return post_incident(client, category="pothole", lat=lat, lng=lng).json()["id"]
+
+
+def _linked_pair(client, post_incident):
+    a = _create_at(client, post_incident, 13.0, 80.0)
+    b = _create_at(client, post_incident, 13.1, 80.1)
+    client.post(f"/incidents/{a}/links", json={"other_id": b})
+    return a, b
 
 
 def _links(session):
@@ -47,9 +56,11 @@ def test_duplicate_link_is_rejected(session):
         session.flush()
 
 
-def test_linking_works_from_either_direction_and_stores_one_row(auth_client, session):
-    a = _create(auth_client)
-    b = _create(auth_client)
+def test_linking_works_from_either_direction_and_stores_one_row(
+    auth_client, post_incident, session
+):
+    a = _create(auth_client, post_incident)
+    b = _create(auth_client, post_incident)
 
     response = auth_client.post(f"/incidents/{b}/links", json={"other_id": a})
     assert response.status_code == 201
@@ -61,24 +72,31 @@ def test_linking_works_from_either_direction_and_stores_one_row(auth_client, ses
     assert len(_links(session)) == 1
 
 
-def test_linking_to_itself_gives_422(auth_client):
-    a = _create(auth_client)
+def test_linking_to_itself_gives_422(auth_client, post_incident):
+    a = _create(auth_client, post_incident)
     response = auth_client.post(f"/incidents/{a}/links", json={"other_id": a})
     assert response.status_code == 422
 
 
-def test_duplicate_link_gives_409(auth_client):
-    a = _create(auth_client)
-    b = _create(auth_client)
+def test_duplicate_link_gives_409(auth_client, post_incident):
+    a = _create(auth_client, post_incident)
+    b = _create(auth_client, post_incident)
 
-    assert auth_client.post(f"/incidents/{a}/links", json={"other_id": b}).status_code == 201
-    assert auth_client.post(f"/incidents/{a}/links", json={"other_id": b}).status_code == 409
-
-
-def test_unknown_incident_gives_404(auth_client):
-    a = _create(auth_client)
     assert (
-        auth_client.post("/incidents/999999/links", json={"other_id": a}).status_code == 404
+        auth_client.post(f"/incidents/{a}/links", json={"other_id": b}).status_code
+        == 201
+    )
+    assert (
+        auth_client.post(f"/incidents/{a}/links", json={"other_id": b}).status_code
+        == 409
+    )
+
+
+def test_unknown_incident_gives_404(auth_client, post_incident):
+    a = _create(auth_client, post_incident)
+    assert (
+        auth_client.post("/incidents/999999/links", json={"other_id": a}).status_code
+        == 404
     )
     assert (
         auth_client.post(f"/incidents/{a}/links", json={"other_id": 999999}).status_code
@@ -86,10 +104,10 @@ def test_unknown_incident_gives_404(auth_client):
     )
 
 
-def test_group_size_through_a_chain(auth_client):
-    a = _create(auth_client)
-    b = _create(auth_client)
-    c = _create(auth_client)
+def test_group_size_through_a_chain(auth_client, post_incident):
+    a = _create(auth_client, post_incident)
+    b = _create(auth_client, post_incident)
+    c = _create(auth_client, post_incident)
     auth_client.post(f"/incidents/{a}/links", json={"other_id": b})
     auth_client.post(f"/incidents/{b}/links", json={"other_id": c})
 
@@ -98,10 +116,10 @@ def test_group_size_through_a_chain(auth_client):
         assert auth_client.get(f"/incidents/{incident_id}").json()["group_size"] == 3
 
 
-def test_deleting_a_link_shrinks_the_group(auth_client):
-    a = _create(auth_client)
-    b = _create(auth_client)
-    c = _create(auth_client)
+def test_deleting_a_link_shrinks_the_group(auth_client, post_incident):
+    a = _create(auth_client, post_incident)
+    b = _create(auth_client, post_incident)
+    c = _create(auth_client, post_incident)
     auth_client.post(f"/incidents/{a}/links", json={"other_id": b})
     auth_client.post(f"/incidents/{b}/links", json={"other_id": c})
 
@@ -111,27 +129,14 @@ def test_deleting_a_link_shrinks_the_group(auth_client):
     assert auth_client.get(f"/incidents/{c}").json()["group_size"] == 1
 
 
-def test_deleting_a_missing_link_gives_404(auth_client):
-    a = _create(auth_client)
-    b = _create(auth_client)
+def test_deleting_a_missing_link_gives_404(auth_client, post_incident):
+    a = _create(auth_client, post_incident)
+    b = _create(auth_client, post_incident)
     assert auth_client.delete(f"/incidents/{a}/links/{b}").status_code == 404
 
 
-def _create_at(auth_client, lat, lng):
-    return auth_client.post(
-        "/incidents", json={"category": "pothole", "lat": lat, "lng": lng}
-    ).json()["id"]
-
-
-def _linked_pair(auth_client):
-    a = _create_at(auth_client, 13.0, 80.0)
-    b = _create_at(auth_client, 13.1, 80.1)
-    auth_client.post(f"/incidents/{a}/links", json={"other_id": b})
-    return a, b
-
-
-def test_links_without_params_returns_all(auth_client):
-    a, b = _linked_pair(auth_client)
+def test_links_without_params_returns_all(auth_client, post_incident):
+    a, b = _linked_pair(auth_client, post_incident)
 
     body = auth_client.get("/links").json()
     assert len(body) == 1
@@ -139,8 +144,8 @@ def test_links_without_params_returns_all(auth_client):
     assert (link["incident_a"], link["incident_b"]) == (min(a, b), max(a, b))
 
 
-def test_links_box_with_both_ends_returns_link(auth_client):
-    _linked_pair(auth_client)
+def test_links_box_with_both_ends_returns_link(auth_client, post_incident):
+    _linked_pair(auth_client, post_incident)
 
     body = auth_client.get(
         "/links",
@@ -154,8 +159,8 @@ def test_links_box_with_both_ends_returns_link(auth_client):
     assert len(body) == 1
 
 
-def test_links_box_with_one_end_returns_link(auth_client):
-    a, _ = _linked_pair(auth_client)
+def test_links_box_with_one_end_returns_link(auth_client, post_incident):
+    a, _ = _linked_pair(auth_client, post_incident)
 
     body = auth_client.get(
         "/links",
@@ -169,8 +174,8 @@ def test_links_box_with_one_end_returns_link(auth_client):
     assert [link["incident_a"] for link in body] == [a]
 
 
-def test_links_box_with_neither_end_returns_nothing(auth_client):
-    _linked_pair(auth_client)
+def test_links_box_with_neither_end_returns_nothing(auth_client, post_incident):
+    _linked_pair(auth_client, post_incident)
 
     body = auth_client.get(
         "/links",
@@ -184,8 +189,8 @@ def test_links_box_with_neither_end_returns_nothing(auth_client):
     assert body == []
 
 
-def test_links_include_both_ends_coordinates(auth_client):
-    a, b = _linked_pair(auth_client)
+def test_links_include_both_ends_coordinates(auth_client, post_incident):
+    a, b = _linked_pair(auth_client, post_incident)
 
     link = auth_client.get("/links").json()[0]
     assert link["incident_a"] == a

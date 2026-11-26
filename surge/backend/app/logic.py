@@ -4,17 +4,8 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .categories import radius_for
 from .models import Event, Incident, IncidentLink
-
-# Match radius per category in metres (starting guesses).
-RADIUS_M = {
-    "pothole": 20.0,
-    "streetlight": 20.0,
-    "fallen_tree": 40.0,
-    "garbage": 40.0,
-    "waterlogging": 100.0,
-    "other": 30.0,
-}
 
 RECENT_DAYS = 21
 MAX_CANDIDATES = 3
@@ -38,7 +29,7 @@ def haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
 
 def match_radius_m(category: str, accuracy_m: float | None) -> float:
     """Category radius plus accuracy, capped at twice the radius."""
-    radius = RADIUS_M[category]
+    radius = radius_for(category)
     if accuracy_m is None:
         return radius
     return min(radius + accuracy_m, 2 * radius)

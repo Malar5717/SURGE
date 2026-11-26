@@ -1,9 +1,11 @@
 from datetime import datetime, timedelta, timezone
 
+from app.categories import radius_for
 from app.logic import haversine_m
 from app.models import Event, Incident
 
 METRES_PER_DEGREE = 111_194.9
+POTHOLE_RADIUS = radius_for("pothole")
 
 
 def _north(lat: float, metres: float) -> float:
@@ -54,20 +56,24 @@ def test_different_category_is_not_returned(client, session):
 
 
 def test_beyond_radius_is_not_returned(client, session):
-    _add_incident(session, "pothole", _north(13.0, 60), 80.0)
+    _add_incident(session, "pothole", _north(13.0, POTHOLE_RADIUS * 3), 80.0)
     assert _candidates(client, "pothole", 13.0, 80.0).json() == []
 
 
 def test_accuracy_widens_radius(client, session):
-    incident = _add_incident(session, "pothole", _north(13.0, 30), 80.0)
+    incident = _add_incident(
+        session, "pothole", _north(13.0, POTHOLE_RADIUS * 1.5), 80.0
+    )
 
     assert _candidates(client, "pothole", 13.0, 80.0).json() == []
-    body = _candidates(client, "pothole", 13.0, 80.0, accuracy_m=15).json()
+    body = _candidates(
+        client, "pothole", 13.0, 80.0, accuracy_m=POTHOLE_RADIUS * 0.75
+    ).json()
     assert [c["id"] for c in body] == [incident.id]
 
 
 def test_accuracy_never_widens_beyond_twice_radius(client, session):
-    _add_incident(session, "pothole", _north(13.0, 50), 80.0)
+    _add_incident(session, "pothole", _north(13.0, POTHOLE_RADIUS * 2.5), 80.0)
 
     body = _candidates(client, "pothole", 13.0, 80.0, accuracy_m=10_000).json()
     assert body == []

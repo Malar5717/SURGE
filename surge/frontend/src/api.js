@@ -25,6 +25,10 @@ async function sendJson(path, body) {
   return data;
 }
 
+export function fetchCategories() {
+  return getJson("/categories");
+}
+
 export function fetchIncidents({ minLat, maxLat, minLng, maxLng }) {
   const params = new URLSearchParams({
     min_lat: minLat,
@@ -33,6 +37,31 @@ export function fetchIncidents({ minLat, maxLat, minLng, maxLng }) {
     max_lng: maxLng,
   });
   return getJson(`/incidents?${params.toString()}`);
+}
+
+export function fetchCandidates({ category, lat, lng, accuracyM }) {
+  const params = new URLSearchParams({
+    category,
+    lat,
+    lng,
+    accuracy_m: accuracyM,
+  });
+  return getJson(`/incidents/candidates?${params.toString()}`);
+}
+
+export async function createIncident(formData) {
+  const response = await fetch(`${BASE}/incidents`, {
+    method: "POST",
+    body: formData,
+  });
+  const data = await response.json().catch(() => null);
+  if (!response.ok) {
+    const error = new Error(`POST /incidents failed with ${response.status}`);
+    error.status = response.status;
+    error.body = data;
+    throw error;
+  }
+  return data;
 }
 
 export function fetchIncident(id) {

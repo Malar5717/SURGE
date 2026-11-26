@@ -1,7 +1,14 @@
 """Reset the main database and load sample incidents around Chennai."""
 
-from app.db import Base, SessionLocal, engine
+import shutil
+from datetime import datetime, timedelta, timezone
+from io import BytesIO
+
+from PIL import Image, ImageDraw
+
+from app.db import Base, SessionLocal, UPLOAD_DIR, engine
 from app.models import Event, Incident, IncidentLink, User
+from app.photos import process_photo
 from app.security import hash_password
 
 DEMO_USERS = ("asha", "ravi", "meena")
@@ -24,31 +31,31 @@ AREAS = {
 SEED = [
     ("Anna Nagar", "pothole", "Deep pothole near the bus stop"),
     ("Anna Nagar", "pothole", "Second pothole on the same stretch"),
-    ("Anna Nagar", "pothole", "Pothole filled with rainwater"),
+    ("Anna Nagar", "road_damage", "Sunken road holding rainwater"),
     ("Anna Nagar", "garbage", "Overflowing bin outside the market"),
     ("Anna Nagar", "waterlogging", "Water knee-deep after last night's rain"),
     ("T. Nagar", "pothole", "Pothole at the junction"),
     ("T. Nagar", "fallen_tree", "Branch blocking the footpath"),
-    ("T. Nagar", "garbage", "Waste dumped on the pavement"),
+    ("T. Nagar", "illegal_dumping", "Waste dumped on the pavement"),
     ("T. Nagar", "streetlight", "Streetlight out for three nights"),
     ("Adyar", "fallen_tree", "Tree leaning over the road"),
-    ("Adyar", "pothole", "Broken road near the school"),
+    ("Adyar", "road_damage", "Broken road near the school"),
     ("Adyar", "waterlogging", "Drain overflow by the park"),
-    ("Adyar", "garbage", "Rubbish piled beside the canal"),
+    ("Adyar", "illegal_dumping", "Rubbish piled beside the canal"),
     ("Mylapore", "streetlight", "Dark stretch near the temple"),
     ("Mylapore", "pothole", "Pothole on the narrow lane"),
     ("Mylapore", "garbage", "Bin not cleared for two days"),
     ("Velachery", "waterlogging", "Underpass floods every evening"),
     ("Velachery", "pothole", "Pothole opposite the mall"),
-    ("Velachery", "garbage", "Construction debris on the road"),
+    ("Velachery", "illegal_dumping", "Construction debris on the road"),
     ("Tambaram", "pothole", "Pothole by the railway station"),
     ("Tambaram", "fallen_tree", "Fallen branch after the storm"),
     ("Porur", "streetlight", "Two lights off on the main road"),
-    ("Porur", "garbage", "Waste near the bus depot"),
+    ("Porur", "illegal_dumping", "Waste near the bus depot"),
     ("Kodambakkam", "pothole", "Pothole outside the cinema"),
     ("Kodambakkam", "waterlogging", "Stagnant water for days"),
     ("Egmore", "garbage", "Litter around the station entrance"),
-    ("Egmore", "other", "Broken footpath slab"),
+    ("Egmore", "public_property_damage", "Broken footpath slab"),
     ("Besant Nagar", "fallen_tree", "Tree down on the beach road"),
     ("Besant Nagar", "pothole", "Pothole near the beach car park"),
     ("Besant Nagar", "waterlogging", "Water pooling at the corner"),
@@ -71,9 +78,34 @@ CLUSTERS = [
 ]
 
 
+def _placeholder(index: int) -> bytes:
+    """Build a visibly different placeholder JPEG for one seeded incident."""
+    width, height = 640, 480
+    image = Image.new(
+        "RGB",
+        (width, height),
+        (
+            (index * 53) % 180 + 40,
+            (index * 97) % 180 + 40,
+            (index * 31) % 180 + 40,
+        ),
+    )
+    draw = ImageDraw.Draw(image)
+    for x in range(0, width, 60):
+        draw.line((x, 0, width - x, height), fill=(20, 20, 20), width=9)
+    left = (index * 37) % (width - 120)
+    top = (index * 53) % (height - 90)
+    draw.rectangle((left, top, left + 120, top + 90), fill=(250, 250, 250))
+    buffer = BytesIO()
+    image.save(buffer, "JPEG", quality=85)
+    return buffer.getvalue()
+
+
 def main():
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
+    shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
     with SessionLocal() as session:
         users = []
@@ -88,19 +120,33 @@ def main():
         session.flush()
 
         incidents = []
+        now = datetime.now(timezone.utc)
         for i, (area, category, description) in enumerate(SEED):
             base_lat, base_lng = AREAS[area]
             lat = base_lat + ((i % 5) - 2) * 0.00005
             lng = base_lng + ((i % 7) - 3) * 0.00005
             creator = users[i % len(users)]
+            photo = process_photo(_placeholder(i), UPLOAD_DIR)
+            created = now - timedelta(days=(i % 10) + 1, hours=(i * 7) % 24)
             incident = Incident(
                 category=category,
                 lat=lat,
                 lng=lng,
                 description=description,
                 created_by=creator.id,
+                created_at=created,
             )
-            incident.events.append(Event(type="reported", created_by=creator.id))
+            incident.events.append(
+                Event(
+                    type="reported",
+                    created_by=creator.id,
+                    photo_file=photo.photo_file,
+                    thumb_file=photo.thumb_file,
+                    phash=photo.phash,
+                    captured_at=created,
+                    created_at=created,
+                )
+            )
             session.add(incident)
             incidents.append(incident)
         session.flush()
@@ -112,6 +158,7 @@ def main():
                     type="note",
                     note=note,
                     created_by=users[(index + 1) % len(users)].id,
+                    created_at=incidents[index].created_at + timedelta(hours=2),
                 )
             )
 

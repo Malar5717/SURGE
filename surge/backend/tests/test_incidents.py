@@ -5,12 +5,6 @@ from sqlalchemy.exc import IntegrityError
 from app.models import Event, Incident
 
 
-def test_invalid_category_is_rejected(session):
-    session.add(Incident(category="banana", lat=13.0, lng=80.0))
-    with pytest.raises(IntegrityError):
-        session.flush()
-
-
 def test_invalid_event_type_is_rejected(session):
     incident = Incident(category="pothole", lat=13.0, lng=80.0)
     session.add(incident)
@@ -21,10 +15,8 @@ def test_invalid_event_type_is_rejected(session):
         session.flush()
 
 
-def test_create_incident_creates_one_reported_event(auth_client, session):
-    response = auth_client.post(
-        "/incidents", json={"category": "pothole", "lat": 13.0, "lng": 80.0}
-    )
+def test_create_incident_creates_one_reported_event(auth_client, post_incident, session):
+    response = post_incident(auth_client)
     assert response.status_code == 201
     body = response.json()
     assert body["category"] == "pothole"
@@ -36,10 +28,8 @@ def test_create_incident_creates_one_reported_event(auth_client, session):
     assert [e.type for e in events] == ["reported"]
 
 
-def test_note_is_appended_oldest_first(auth_client):
-    incident = auth_client.post(
-        "/incidents", json={"category": "garbage", "lat": 13.0, "lng": 80.0}
-    ).json()
+def test_note_is_appended_oldest_first(auth_client, post_incident):
+    incident = post_incident(auth_client, category="garbage").json()
 
     note = auth_client.post(
         f"/incidents/{incident['id']}/events",
@@ -52,10 +42,8 @@ def test_note_is_appended_oldest_first(auth_client):
     assert detail["events"][1]["note"] == "still here"
 
 
-def test_reported_event_cannot_be_added(auth_client):
-    incident = auth_client.post(
-        "/incidents", json={"category": "pothole", "lat": 13.0, "lng": 80.0}
-    ).json()
+def test_reported_event_cannot_be_added(auth_client, post_incident):
+    incident = post_incident(auth_client).json()
 
     response = auth_client.post(
         f"/incidents/{incident['id']}/events",
@@ -64,18 +52,15 @@ def test_reported_event_cannot_be_added(auth_client):
     assert response.status_code == 422
 
 
-def test_invalid_category_gives_422(auth_client):
-    response = auth_client.post(
-        "/incidents", json={"category": "banana", "lat": 13.0, "lng": 80.0}
-    )
+def test_invalid_category_gives_422(auth_client, post_incident, session):
+    response = post_incident(auth_client, category="banana")
     assert response.status_code == 422
+    assert session.scalars(select(Incident)).all() == []
 
 
 @pytest.mark.parametrize("lat,lng", [(91, 80), (-91, 80), (13, 181), (13, -181)])
-def test_out_of_range_coordinates_give_422(auth_client, lat, lng):
-    response = auth_client.post(
-        "/incidents", json={"category": "pothole", "lat": lat, "lng": lng}
-    )
+def test_out_of_range_coordinates_give_422(auth_client, post_incident, lat, lng):
+    response = post_incident(auth_client, lat=lat, lng=lng)
     assert response.status_code == 422
 
 
@@ -89,19 +74,17 @@ def test_missing_incident_gives_404(auth_client):
     )
 
 
-def test_bounding_box_filter(auth_client):
-    near = auth_client.post(
-        "/incidents", json={"category": "pothole", "lat": 13.0, "lng": 80.0}
-    ).json()
-    auth_client.post("/incidents", json={"category": "garbage", "lat": 14.0, "lng": 81.0})
+def test_bounding_box_filter(auth_client, post_incident):
+    near = post_incident(auth_client, lat=13.0, lng=80.0).json()
+    post_incident(auth_client, category="garbage", lat=13.25, lng=80.30)
 
     response = auth_client.get(
         "/incidents",
         params={
-            "min_lat": 12.5,
-            "max_lat": 13.5,
-            "min_lng": 79.5,
-            "max_lng": 80.5,
+            "min_lat": 12.95,
+            "max_lat": 13.05,
+            "min_lng": 79.95,
+            "max_lng": 80.05,
         },
     )
     assert response.status_code == 200

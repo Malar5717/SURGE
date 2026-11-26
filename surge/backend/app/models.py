@@ -18,11 +18,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
 
-CATEGORIES = ("pothole", "streetlight", "fallen_tree", "garbage", "waterlogging", "other")
 EVENT_TYPES = ("reported", "note")
 AUTH_EVENT_TYPES = ("signup", "login_ok", "login_fail", "logout")
 
-_CATEGORY_IN = "category IN (" + ", ".join(repr(c) for c in CATEGORIES) + ")"
 _TYPE_IN = "type IN (" + ", ".join(repr(t) for t in EVENT_TYPES) + ")"
 _AUTH_EVENT_IN = "event IN (" + ", ".join(repr(e) for e in AUTH_EVENT_TYPES) + ")"
 
@@ -107,8 +105,23 @@ class Incident(Base):
     def created_by_handle(self) -> str | None:
         return self.creator.handle if self.creator else None
 
+    @property
+    def _reported_event(self) -> "Event | None":
+        return next(
+            (event for event in self.events if event.type == "reported"), None
+        )
+
+    @property
+    def photo_url(self) -> str | None:
+        event = self._reported_event
+        return f"/photos/{event.photo_file}" if event and event.photo_file else None
+
+    @property
+    def thumb_url(self) -> str | None:
+        event = self._reported_event
+        return f"/photos/{event.thumb_file}" if event and event.thumb_file else None
+
     __table_args__ = (
-        CheckConstraint(_CATEGORY_IN, name="ck_incidents_category"),
         CheckConstraint("lat BETWEEN -90 AND 90", name="ck_incidents_lat"),
         CheckConstraint("lng BETWEEN -180 AND 180", name="ck_incidents_lng"),
         Index("ix_incidents_category_lat_lng", "category", "lat", "lng"),
@@ -124,6 +137,10 @@ class Event(Base):
     )
     type: Mapped[str] = mapped_column(String(16), nullable=False)
     note: Mapped[str | None] = mapped_column(Text)
+    photo_file: Mapped[str | None] = mapped_column(String(64))
+    thumb_file: Mapped[str | None] = mapped_column(String(64))
+    phash: Mapped[str | None] = mapped_column(String(16), index=True)
+    captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -135,6 +152,14 @@ class Event(Base):
     @property
     def created_by_handle(self) -> str | None:
         return self.creator.handle if self.creator else None
+
+    @property
+    def photo_url(self) -> str | None:
+        return f"/photos/{self.photo_file}" if self.photo_file else None
+
+    @property
+    def thumb_url(self) -> str | None:
+        return f"/photos/{self.thumb_file}" if self.thumb_file else None
 
     __table_args__ = (CheckConstraint(_TYPE_IN, name="ck_events_type"),)
 

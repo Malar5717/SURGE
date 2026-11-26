@@ -1,19 +1,45 @@
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import and_, or_, select, text, true
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+)
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict
+from sqlalchemy import and_, func, or_, select, text, true
 from sqlalchemy.orm import Session, aliased
 
 from . import models  # noqa: F401  (registers tables on Base.metadata)
 from .auth import current_user, router as auth_router
-from .db import Base, engine, get_session
-from .models import CATEGORIES, Event, Incident, IncidentLink, User
+from .categories import CATEGORIES, CATEGORY_BY_SLUG
+from .db import Base, SENSITIVE_ENABLED, UPLOAD_DIR, engine, get_session
+from .models import Event, Incident, IncidentLink, User
 from .logic import find_candidates, group_of, linked_ids
+from .photos import (
+    DUP_HAMMING_MAX,
+    DUP_WINDOW_DAYS,
+    InvalidPhoto,
+    MAX_UPLOAD_BYTES,
+    PhotoTooLarge,
+    hamming_distance,
+    process_photo,
+    remove_photos,
+)
 
-Category = Literal[*CATEGORIES]
+MAX_ACCURACY_M = 100
+MAX_CAPTURE_AGE_MIN = 15
+MAX_CAPTURE_FUTURE_MIN = 2
+MAX_DESCRIPTION = 280
+MAX_LINKS = 3
+POSTS_PER_HOUR = 10
+SERVICE_AREA = (12.80, 13.30, 79.95, 80.35)  # min_lat, max_lat, min_lng, max_lng
 
 
 @asynccontextmanager
@@ -24,14 +50,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="SURGE API", version="0.1.0", lifespan=lifespan)
 app.include_router(auth_router)
-
-
-class IncidentCreate(BaseModel):
-    category: Category
-    lat: float = Field(ge=-90, le=90)
-    lng: float = Field(ge=-180, le=180)
-    accuracy_m: float | None = None
-    description: str | None = None
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/photos", StaticFiles(directory=UPLOAD_DIR), name="photos")
 
 
 class IncidentOut(BaseModel):
@@ -45,6 +65,8 @@ class IncidentOut(BaseModel):
     description: str | None
     created_by_handle: str | None
     created_at: datetime
+    photo_url: str | None
+    thumb_url: str | None
 
 
 class EventOut(BaseModel):
@@ -56,6 +78,8 @@ class EventOut(BaseModel):
     note: str | None
     created_by_handle: str | None
     created_at: datetime
+    photo_url: str | None
+    thumb_url: str | None
 
 
 class IncidentDetail(IncidentOut):
@@ -66,6 +90,15 @@ class IncidentDetail(IncidentOut):
 
 class CandidateOut(IncidentOut):
     distance_m: float
+
+
+class CategoryOut(BaseModel):
+    slug: str
+    label: str
+    group: str
+    sensitive: bool
+    postable: bool
+    radius_m: float
 
 
 class LinkCreate(BaseModel):
@@ -122,6 +155,17 @@ def _get_incident(session: Session, incident_id: int) -> Incident:
     return incident
 
 
+def _require_category(slug: str, *, for_posting: bool = False) -> None:
+    """Reject unknown slugs, and sensitive slugs while posting is closed."""
+    category = CATEGORY_BY_SLUG.get(slug)
+    if category is None:
+        raise HTTPException(status_code=422, detail="unknown category")
+    if for_posting and category.sensitive and not SENSITIVE_ENABLED:
+        raise HTTPException(
+            status_code=403, detail="this category is not open for posting yet"
+        )
+
+
 @app.get("/health")
 def health(session: Session = Depends(get_session)):
     """Return ok after a successful database round trip."""
@@ -129,17 +173,153 @@ def health(session: Session = Depends(get_session)):
     return {"status": "ok", "database": "ok"}
 
 
+@app.get("/categories", response_model=list[CategoryOut])
+def list_categories():
+    """Return every category with its group and posting status."""
+    return [
+        CategoryOut(
+            slug=category.slug,
+            label=category.label,
+            group=category.group,
+            sensitive=category.sensitive,
+            postable=not category.sensitive or SENSITIVE_ENABLED,
+            radius_m=category.radius_m,
+        )
+        for category in CATEGORIES
+    ]
+
+
 @app.post("/incidents", response_model=IncidentDetail, status_code=201)
 def create_incident(
-    payload: IncidentCreate,
+    photo: UploadFile = File(...),
+    category: str = Form(...),
+    lat: float = Form(ge=-90, le=90),
+    lng: float = Form(ge=-180, le=180),
+    accuracy_m: float = Form(...),
+    captured_at: str = Form(...),
+    description: str | None = Form(None),
+    link_to: Annotated[list[int], Form()] = [],
     user: User = Depends(current_user),
     session: Session = Depends(get_session),
 ):
-    """Store a new incident and its first reported event."""
-    incident = Incident(**payload.model_dump(), created_by=user.id)
-    incident.events.append(Event(type="reported", created_by=user.id))
+    """Store a posted incident, its photo-carrying event and any chosen links."""
+    now = datetime.now(timezone.utc)
+    recent = session.scalar(
+        select(func.count())
+        .select_from(Incident)
+        .where(
+            Incident.created_by == user.id,
+            Incident.created_at >= now - timedelta(hours=1),
+        )
+    )
+    if recent >= POSTS_PER_HOUR:
+        raise HTTPException(status_code=429, detail="too many posts, try again later")
+
+    _require_category(category, for_posting=True)
+
+    min_lat, max_lat, min_lng, max_lng = SERVICE_AREA
+    if not (min_lat <= lat <= max_lat and min_lng <= lng <= max_lng):
+        raise HTTPException(status_code=422, detail="location is outside the service area")
+    if accuracy_m > MAX_ACCURACY_M:
+        raise HTTPException(status_code=422, detail="location accuracy is too low")
+
+    try:
+        taken_at = datetime.fromisoformat(captured_at)
+    except ValueError:
+        raise HTTPException(
+            status_code=422, detail="captured_at must be an ISO 8601 datetime"
+        )
+    if taken_at.tzinfo is None:
+        taken_at = taken_at.replace(tzinfo=timezone.utc)
+    if taken_at < now - timedelta(minutes=MAX_CAPTURE_AGE_MIN):
+        raise HTTPException(status_code=422, detail="photo is too old")
+    if taken_at > now + timedelta(minutes=MAX_CAPTURE_FUTURE_MIN):
+        raise HTTPException(status_code=422, detail="photo time is in the future")
+
+    if description is not None:
+        description = description.strip() or None
+    if description is not None and len(description) > MAX_DESCRIPTION:
+        raise HTTPException(
+            status_code=422,
+            detail=f"description is longer than {MAX_DESCRIPTION} characters",
+        )
+
+    data = photo.file.read()
+    if not data:
+        raise HTTPException(status_code=422, detail="photo is required")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="photo is larger than 5 MB")
+    try:
+        processed = process_photo(data, UPLOAD_DIR)
+    except PhotoTooLarge:
+        raise HTTPException(status_code=413, detail="photo is larger than 5 MB")
+    except InvalidPhoto:
+        raise HTTPException(
+            status_code=422, detail="photo must be a JPEG or PNG image"
+        )
+
+    cutoff = now - timedelta(days=DUP_WINDOW_DAYS)
+    for existing_hash, existing_id in session.execute(
+        select(Event.phash, Event.incident_id).where(
+            Event.phash.is_not(None), Event.created_at >= cutoff
+        )
+    ):
+        if hamming_distance(existing_hash, processed.phash) <= DUP_HAMMING_MAX:
+            remove_photos(UPLOAD_DIR, processed.photo_file, processed.thumb_file)
+            raise HTTPException(
+                status_code=409,
+                detail={"existing_incident_id": existing_id},
+            )
+
+    link_ids = sorted(set(link_to))
+    if len(link_ids) > MAX_LINKS:
+        remove_photos(UPLOAD_DIR, processed.photo_file, processed.thumb_file)
+        raise HTTPException(
+            status_code=422, detail=f"at most {MAX_LINKS} links are allowed"
+        )
+    candidate_ids = {
+        incident.id
+        for _, incident in find_candidates(
+            session, category, lat, lng, accuracy_m
+        )
+    }
+    if any(other_id not in candidate_ids for other_id in link_ids):
+        remove_photos(UPLOAD_DIR, processed.photo_file, processed.thumb_file)
+        raise HTTPException(
+            status_code=422, detail="can only link to nearby suggested incidents"
+        )
+
+    incident = Incident(
+        category=category,
+        lat=lat,
+        lng=lng,
+        accuracy_m=accuracy_m,
+        description=description,
+        created_by=user.id,
+    )
+    incident.events.append(
+        Event(
+            type="reported",
+            created_by=user.id,
+            photo_file=processed.photo_file,
+            thumb_file=processed.thumb_file,
+            phash=processed.phash,
+            captured_at=taken_at,
+        )
+    )
     session.add(incident)
-    session.commit()
+    try:
+        session.flush()
+        for other_id in link_ids:
+            a, b = sorted((incident.id, other_id))
+            session.add(
+                IncidentLink(incident_a=a, incident_b=b, created_by=user.id)
+            )
+        session.commit()
+    except Exception:
+        session.rollback()
+        remove_photos(UPLOAD_DIR, processed.photo_file, processed.thumb_file)
+        raise
     session.refresh(incident)
     return _detail(session, incident)
 
@@ -167,13 +347,14 @@ def list_incidents(
 
 @app.get("/incidents/candidates", response_model=list[CandidateOut])
 def incident_candidates(
-    category: Category,
+    category: str,
     lat: Annotated[float, Query(ge=-90, le=90)],
     lng: Annotated[float, Query(ge=-180, le=180)],
     accuracy_m: float | None = None,
     session: Session = Depends(get_session),
 ):
     """Return up to three nearby incidents of the same category, nearest first."""
+    _require_category(category)
     return [
         CandidateOut(
             **IncidentOut.model_validate(incident).model_dump(),

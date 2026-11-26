@@ -1,20 +1,23 @@
-import { CATEGORIES } from "../categories.js";
+import { GROUP_COLORS, groupLabel } from "../categories.js";
 
-export default function FilterChips({ active, onToggle }) {
+export default function FilterChips({ groups, active, onToggle }) {
   return (
     <div className="chips">
-      {CATEGORIES.map((category) => {
-        const on = active.has(category.key);
+      {groups.map((group) => {
+        const on = active.has(group);
         return (
           <button
-            key={category.key}
+            key={group}
             type="button"
             className={`chip ${on ? "chip-on" : "chip-off"}`}
             aria-pressed={on}
-            onClick={() => onToggle(category.key)}
+            onClick={() => onToggle(group)}
           >
-            <span className="chip-dot" style={{ background: category.color }} />
-            {category.label}
+            <span
+              className="chip-dot"
+              style={{ background: GROUP_COLORS[group] ?? "grey" }}
+            />
+            {groupLabel(group)}
           </button>
         );
       })}

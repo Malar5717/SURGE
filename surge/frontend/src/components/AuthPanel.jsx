@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { login, signup } from "../api.js";
 
 function errorMessage(error) {
@@ -11,13 +11,25 @@ function errorMessage(error) {
   return "Cannot reach the backend. Is it running on port 8000?";
 }
 
-export default function AuthPanel({ user, onAuth, onLogout }) {
+export default function AuthPanel({
+  user,
+  onAuth,
+  onLogout,
+  openSignal = 0,
+}) {
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState("login");
   const [handle, setHandle] = useState("");
   const [password, setPassword] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (openSignal > 0) {
+      setOpen(true);
+      setMessage("");
+    }
+  }, [openSignal]);
 
   if (user) {
     return (

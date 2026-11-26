@@ -7,16 +7,31 @@ import {
   useMap,
   useMapEvents,
 } from "react-leaflet";
-import { fetchIncidents, fetchLinks } from "../api.js";
-import { CATEGORIES, CATEGORY_BY_KEY } from "../categories.js";
+import {
+  fetchCategories,
+  fetchIncident,
+  fetchIncidents,
+  fetchLinks,
+} from "../api.js";
+import { GROUP_COLORS } from "../categories.js";
 import AuthPanel from "./AuthPanel.jsx";
 import DetailPanel from "./DetailPanel.jsx";
 import FilterChips from "./FilterChips.jsx";
+import ReportFlow from "./ReportFlow.jsx";
 
 const CHENNAI = [13.0827, 80.2707];
 const OSM_ATTRIBUTION =
   '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
-const ALL_CATEGORIES = new Set(CATEGORIES.map((category) => category.key));
+
+function groupKeys(categories) {
+  return [
+    ...new Set(
+      categories
+        .filter((category) => category.postable)
+        .map((category) => category.group),
+    ),
+  ];
+}
 
 function toBox(bounds) {
   return {
@@ -62,12 +77,35 @@ function MapController({ onReady }) {
 export default function MapView({ user, onAuth, onLogout }) {
   const [incidents, setIncidents] = useState([]);
   const [links, setLinks] = useState([]);
+  const [categories, setCategories] = useState([]);
   const [status, setStatus] = useState("loading");
   const [selectedId, setSelectedId] = useState(null);
-  const [activeCategories, setActiveCategories] = useState(ALL_CATEGORIES);
+  const [activeGroups, setActiveGroups] = useState(new Set());
+  const [reportOpen, setReportOpen] = useState(false);
+  const [loginTick, setLoginTick] = useState(0);
   const requestId = useRef(0);
   const mapRef = useRef(null);
-  const categoryCache = useRef(new Map());
+  const categoryBySlug = useRef(new Map());
+  const incidentCategory = useRef(new Map());
+
+  useEffect(() => {
+    let active = true;
+    fetchCategories()
+      .then((data) => {
+        if (!active) return;
+        categoryBySlug.current = new Map(
+          data.map((category) => [category.slug, category]),
+        );
+        setCategories(data);
+        setActiveGroups(new Set(groupKeys(data)));
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const groupOf = (slug) => categoryBySlug.current.get(slug)?.group ?? "other";
 
   const load = async (box) => {
     const current = ++requestId.current;
@@ -79,7 +117,7 @@ export default function MapView({ user, onAuth, onLogout }) {
       ]);
       if (current !== requestId.current) return;
       for (const incident of incidentData) {
-        categoryCache.current.set(incident.id, incident.category);
+        incidentCategory.current.set(incident.id, incident.category);
       }
       setIncidents(incidentData);
       setLinks(linkData);
@@ -108,30 +146,31 @@ export default function MapView({ user, onAuth, onLogout }) {
     setSelectedId(id);
   };
 
-  const toggleCategory = (key) => {
-    const next = new Set(activeCategories);
+  const toggleGroup = (key) => {
+    const next = new Set(activeGroups);
     if (next.has(key)) {
       next.delete(key);
     } else {
       next.add(key);
     }
-    setActiveCategories(next);
-    if (
-      selectedId !== null &&
-      categoryCache.current.get(selectedId) === key &&
-      !next.has(key)
-    ) {
-      setSelectedId(null);
+    setActiveGroups(next);
+    if (selectedId !== null) {
+      const category = incidentCategory.current.get(selectedId);
+      if (category !== undefined && groupOf(category) === key && !next.has(key)) {
+        setSelectedId(null);
+      }
     }
   };
 
   const isHidden = (id) => {
-    const category = categoryCache.current.get(id);
-    return category !== undefined && !activeCategories.has(category);
+    const category = incidentCategory.current.get(id);
+    if (category === undefined || categories.length === 0) return false;
+    return !activeGroups.has(groupOf(category));
   };
 
-  const visibleIncidents = incidents.filter((incident) =>
-    activeCategories.has(incident.category),
+  const visibleIncidents = incidents.filter(
+    (incident) =>
+      categories.length === 0 || activeGroups.has(groupOf(incident.category)),
   );
   const visibleLinks = links.filter(
     (link) => !isHidden(link.incident_a) && !isHidden(link.incident_b),
@@ -139,6 +178,52 @@ export default function MapView({ user, onAuth, onLogout }) {
   const knownIncidents = new Map(
     incidents.map((incident) => [incident.id, incident]),
   );
+
+  const revealGroup = (categorySlug) => {
+    const group = groupOf(categorySlug);
+    setActiveGroups((current) => {
+      if (current.has(group)) return current;
+      const next = new Set(current);
+      next.add(group);
+      return next;
+    });
+  };
+
+  const startReport = () => {
+    if (!user) {
+      setLoginTick((count) => count + 1);
+      return;
+    }
+    setReportOpen(true);
+  };
+
+  const handlePosted = (incident) => {
+    setReportOpen(false);
+    revealGroup(incident.category);
+    if (mapRef.current) {
+      mapRef.current.flyTo([incident.lat, incident.lng], 16);
+    }
+    setSelectedId(incident.id);
+  };
+
+  const handleOpenIncident = async (id) => {
+    setReportOpen(false);
+    try {
+      const incident = await fetchIncident(id);
+      revealGroup(incident.category);
+      if (mapRef.current) {
+        mapRef.current.flyTo([incident.lat, incident.lng], 16);
+      }
+    } catch {
+      // The panel shows its own error if the incident has gone.
+    }
+    setSelectedId(id);
+  };
+
+  const handleLoginRequest = () => {
+    setReportOpen(false);
+    setLoginTick((count) => count + 1);
+  };
 
   return (
     <div className="map-wrap">
@@ -171,7 +256,7 @@ export default function MapView({ user, onAuth, onLogout }) {
         })}
 
         {visibleIncidents.map((incident) => {
-          const category = CATEGORY_BY_KEY[incident.category];
+          const color = GROUP_COLORS[groupOf(incident.category)] ?? "grey";
           return (
             <CircleMarker
               key={incident.id}
@@ -179,8 +264,8 @@ export default function MapView({ user, onAuth, onLogout }) {
               radius={8}
               bubblingMouseEvents={false}
               pathOptions={{
-                color: category.color,
-                fillColor: category.color,
+                color,
+                fillColor: color,
                 fillOpacity: 0.8,
                 weight: 1,
               }}
@@ -194,9 +279,21 @@ export default function MapView({ user, onAuth, onLogout }) {
 
       <div className="overlay-top">
         <div className="auth-row">
-          <AuthPanel user={user} onAuth={onAuth} onLogout={onLogout} />
+          <button type="button" className="auth-btn" onClick={startReport}>
+            Report
+          </button>
+          <AuthPanel
+            user={user}
+            onAuth={onAuth}
+            onLogout={onLogout}
+            openSignal={loginTick}
+          />
         </div>
-        <FilterChips active={activeCategories} onToggle={toggleCategory} />
+        <FilterChips
+          groups={groupKeys(categories)}
+          active={activeGroups}
+          onToggle={toggleGroup}
+        />
         {status === "loading" && <div className="status">Loading…</div>}
         {status === "empty" && <div className="status">No incidents here</div>}
         {status === "error" && (
@@ -212,6 +309,17 @@ export default function MapView({ user, onAuth, onLogout }) {
           onClose={() => setSelectedId(null)}
           onSelectLinked={selectLinked}
           knownIncidents={knownIncidents}
+          categories={categoryBySlug.current}
+        />
+      )}
+
+      {reportOpen && (
+        <ReportFlow
+          categories={categories}
+          onClose={() => setReportOpen(false)}
+          onPosted={handlePosted}
+          onOpenIncident={handleOpenIncident}
+          onLogin={handleLoginRequest}
         />
       )}
     </div>

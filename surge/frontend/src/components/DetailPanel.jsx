@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { fetchIncident } from "../api.js";
-import { CATEGORY_BY_KEY } from "../categories.js";
+import { GROUP_COLORS } from "../categories.js";
 
 export default function DetailPanel({
   incidentId,
   onClose,
   onSelectLinked,
   knownIncidents,
+  categories,
 }) {
   const [incident, setIncident] = useState(null);
   const [status, setStatus] = useState("loading");
@@ -29,7 +30,7 @@ export default function DetailPanel({
     };
   }, [incidentId]);
 
-  const category = incident ? CATEGORY_BY_KEY[incident.category] : null;
+  const category = incident ? categories.get(incident.category) : null;
   const others = incident ? incident.group_size - 1 : 0;
 
   return (
@@ -37,7 +38,10 @@ export default function DetailPanel({
       <header className="panel-header">
         <span className="panel-category">
           {category && (
-            <span className="panel-dot" style={{ background: category.color }} />
+            <span
+              className="panel-dot"
+              style={{ background: GROUP_COLORS[category.group] ?? "grey" }}
+            />
           )}
           {category ? category.label : "Incident"}
         </span>
@@ -53,6 +57,16 @@ export default function DetailPanel({
 
       {status === "ready" && incident && (
         <>
+          {incident.photo_url ? (
+            <img
+              className="panel-photo"
+              src={`/api${incident.photo_url}`}
+              alt={category ? category.label : "Reported photo"}
+            />
+          ) : (
+            <div className="panel-photo panel-photo-empty">No photo</div>
+          )}
+
           {incident.description && (
             <p className="panel-description">{incident.description}</p>
           )}
@@ -86,7 +100,7 @@ export default function DetailPanel({
                 {incident.linked_incident_ids.map((id) => {
                   const known = knownIncidents?.get(id);
                   const linkedCategory = known
-                    ? CATEGORY_BY_KEY[known.category]
+                    ? categories.get(known.category)
                     : null;
                   return (
                     <li key={id}>
@@ -97,7 +111,10 @@ export default function DetailPanel({
                         {linkedCategory && (
                           <span
                             className="panel-dot"
-                            style={{ background: linkedCategory.color }}
+                            style={{
+                              background:
+                                GROUP_COLORS[linkedCategory.group] ?? "grey",
+                            }}
                           />
                         )}
                         {linkedCategory ? linkedCategory.label : "Report"} #{id}

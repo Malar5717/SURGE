@@ -17,15 +17,12 @@ def _signup(client, handle, password="password123"):
     assert response.status_code == 201
 
 
-def _new_incident(client):
-    return client.post(
-        "/incidents", json={"category": "pothole", "lat": 13.0, "lng": 80.0}
-    )
+def _new_incident(client, post_incident, category="pothole"):
+    return post_incident(client, category=category)
 
 
-def test_each_write_endpoint_needs_a_login(client):
-    payload = {"category": "pothole", "lat": 13.0, "lng": 80.0}
-    assert client.post("/incidents", json=payload).status_code == 401
+def test_each_write_endpoint_needs_a_login(client, post_incident):
+    assert post_incident(client).status_code == 401
     assert (
         client.post(
             "/incidents/1/events", json={"type": "note", "note": "x"}
@@ -36,8 +33,8 @@ def test_each_write_endpoint_needs_a_login(client):
     assert client.delete("/incidents/1/links/2").status_code == 401
 
 
-def test_reads_still_work_logged_out(auth_client):
-    incident = _new_incident(auth_client).json()
+def test_reads_still_work_logged_out(auth_client, post_incident):
+    incident = _new_incident(auth_client, post_incident).json()
     auth_client.cookies.clear()
 
     assert auth_client.get("/incidents").status_code == 200
@@ -52,10 +49,12 @@ def test_reads_still_work_logged_out(auth_client):
     )
 
 
-def test_created_rows_carry_the_logged_in_user(auth_client, session):
+def test_created_rows_carry_the_logged_in_user(
+    auth_client, post_incident, session
+):
     user = session.scalar(select(User).where(User.handle_lower == "tester"))
-    incident = _new_incident(auth_client).json()
-    other = _new_incident(auth_client).json()
+    incident = _new_incident(auth_client, post_incident).json()
+    other = _new_incident(auth_client, post_incident).json()
 
     note = auth_client.post(
         f"/incidents/{incident['id']}/events",
@@ -84,8 +83,10 @@ def test_created_rows_carry_the_logged_in_user(auth_client, session):
     assert stored_link.created_by == user.id
 
 
-def test_responses_show_the_handle_and_never_the_user_id(auth_client):
-    incident = _new_incident(auth_client).json()
+def test_responses_show_the_handle_and_never_the_user_id(
+    auth_client, post_incident
+):
+    incident = _new_incident(auth_client, post_incident).json()
     assert incident["created_by_handle"] == "tester"
     assert "created_by" not in incident
     assert all("created_by" not in event for event in incident["events"])
@@ -97,9 +98,7 @@ def test_responses_show_the_handle_and_never_the_user_id(auth_client):
     assert note["created_by_handle"] == "tester"
     assert "created_by" not in note
 
-    other = auth_client.post(
-        "/incidents", json={"category": "garbage", "lat": 13.0, "lng": 80.0}
-    ).json()
+    other = _new_incident(auth_client, post_incident, category="garbage").json()
     link = auth_client.post(
         f"/incidents/{incident['id']}/links", json={"other_id": other["id"]}
     ).json()
@@ -111,12 +110,12 @@ def test_responses_show_the_handle_and_never_the_user_id(auth_client):
     assert "created_by" not in detail
 
 
-def test_only_the_link_creator_can_delete_it(client):
+def test_only_the_link_creator_can_delete_it(client, post_incident):
     _signup(client, "asha")
-    incident = _new_incident(client).json()
-    other = _new_incident(client).json()
+    incident = _new_incident(client, post_incident).json()
+    other = _new_incident(client, post_incident).json()
     link = client.post(
-        f"/incidents/{incident['id']}/links", json={"other_id": other['id']}
+        f"/incidents/{incident['id']}/links", json={"other_id": other["id"]}
     ).json()
 
     client.post("/auth/logout")
